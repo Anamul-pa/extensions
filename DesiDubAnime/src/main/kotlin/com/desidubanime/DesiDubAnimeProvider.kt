@@ -1,5 +1,6 @@
 package com.desidubanime
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
@@ -91,7 +92,6 @@ class DesiDubAnimeProvider : MainAPI() {
     ): Boolean {
         val document = app.get(data).document
 
-        // পেজে থাকা সব iframe ভিডিও সোর্স খুঁজে বের করা
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
             if (src.isNotBlank()) {
@@ -99,12 +99,11 @@ class DesiDubAnimeProvider : MainAPI() {
             }
         }
 
-        // ড্রপডাউন বা সার্ভার বাটনে লুকানো base64/iframe লিংক চেক করা
         document.select("select.mirror option, div.player-option").forEach { option ->
             val encoded = option.attr("value").ifEmpty { option.attr("data-embed") }
             if (encoded.isNotBlank()) {
                 val decoded = try {
-                    base64Decode(encoded)
+                    String(Base64.decode(encoded, Base64.DEFAULT))
                 } catch (e: Exception) {
                     encoded
                 }
