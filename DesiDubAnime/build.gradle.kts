@@ -1,4 +1,4 @@
-version = 6
+version = 7
 
 cloudstream {
     description = "Hindi Dubbed Anime from DesiDubAnime"
