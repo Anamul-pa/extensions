@@ -1,6 +1,8 @@
 package com.desidubanime
 
 import android.annotation.SuppressLint
+import android.app.Application
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
@@ -10,7 +12,6 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.delay
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -31,6 +32,16 @@ class DesiDubAnimeProvider : MainAPI() {
     private var savedUserAgent: String =
         "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
+    private fun getAppContext(): Context? {
+        return try {
+            val activityThread = Class.forName("android.app.ActivityThread")
+            val currentApp = activityThread.getMethod("currentApplication").invoke(null) as? Application
+            currentApp?.applicationContext
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun getHeaders(): Map<String, String> {
         val map = mutableMapOf(
             "User-Agent" to savedUserAgent,
@@ -45,9 +56,9 @@ class DesiDubAnimeProvider : MainAPI() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun bypassCloudflareWithWebView(targetUrl: String) {
-        val ctx = AcraApplication.context ?: return
-        var done = false
+    private fun bypassCloudflareWithWebView(targetUrl: String) {
+        val ctx = getAppContext() ?: return
+        @Volatile var done = false
 
         Handler(Looper.getMainLooper()).post {
             try {
@@ -64,7 +75,8 @@ class DesiDubAnimeProvider : MainAPI() {
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         val cookies = cookieManager.getCookie(mainUrl) ?: ""
-                        if (cookies.contains("cf_clearance") || (view?.title?.contains("Just a moment") == false && view.title?.isNotBlank() == true)) {
+                        val pageTitle = view?.title ?: ""
+                        if (cookies.contains("cf_clearance") || (!pageTitle.contains("Just a moment") && pageTitle.isNotBlank())) {
                             savedCookies = cookies
                             done = true
                         }
@@ -78,7 +90,11 @@ class DesiDubAnimeProvider : MainAPI() {
 
         var waited = 0
         while (!done && waited < 15000) {
-            delay(500)
+            try {
+                Thread.sleep(500)
+            } catch (_: Exception) {
+                break
+            }
             waited += 500
             val currentCookies = try {
                 CookieManager.getInstance().getCookie(mainUrl) ?: ""
