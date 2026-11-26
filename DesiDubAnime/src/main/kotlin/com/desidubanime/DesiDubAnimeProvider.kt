@@ -15,6 +15,7 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.util.concurrent.atomic.AtomicBoolean
 
 class DesiDubAnimeProvider : MainAPI() {
     override var mainUrl = "https://www.desidubanime.me"
@@ -58,7 +59,7 @@ class DesiDubAnimeProvider : MainAPI() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun bypassCloudflareWithWebView(targetUrl: String) {
         val ctx = getAppContext() ?: return
-        @Volatile var done = false
+        val done = AtomicBoolean(false)
 
         Handler(Looper.getMainLooper()).post {
             try {
@@ -78,18 +79,18 @@ class DesiDubAnimeProvider : MainAPI() {
                         val pageTitle = view?.title ?: ""
                         if (cookies.contains("cf_clearance") || (!pageTitle.contains("Just a moment") && pageTitle.isNotBlank())) {
                             savedCookies = cookies
-                            done = true
+                            done.set(true)
                         }
                     }
                 }
                 webView.loadUrl(targetUrl)
             } catch (_: Exception) {
-                done = true
+                done.set(true)
             }
         }
 
         var waited = 0
-        while (!done && waited < 15000) {
+        while (!done.get() && waited < 15000) {
             try {
                 Thread.sleep(500)
             } catch (_: Exception) {
