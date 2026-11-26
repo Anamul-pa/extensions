@@ -2,6 +2,7 @@ package com.desidubanime
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
@@ -17,9 +18,17 @@ class DesiDubAnimeProvider : MainAPI() {
         TvType.OVA
     )
 
+    private val cfInterceptor = CloudflareKiller()
+    private val headers = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.9",
+        "Referer" to "$mainUrl/"
+    )
+
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Latest & Trending",
-        "$mainUrl/search/?s_orderby=updated&s_order=desc&s_type[]=tv&s_paged=" to "Latest TV Series",
+        "$mainUrl/search/?s_orderby=updated&s_order=desc&s_paged=" to "Latest Updates",
         "$mainUrl/search/?s_orderby=date&s_order=desc&s_type[]=movie&s_paged=" to "Latest Movies",
         "$mainUrl/search/?s_orderby=popular&s_paged=" to "Most Popular",
         "$mainUrl/tag/hindi/page/" to "Hindi Dubbed"
@@ -30,12 +39,12 @@ class DesiDubAnimeProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
         val url = if (request.data == "$mainUrl/") {
-            if (page == 1) mainUrl else "$mainUrl/search/?s_orderby=updated&s_order=desc&s_paged=$page"
+            if (page == 1) "$mainUrl/" else "$mainUrl/search/?s_orderby=updated&s_order=desc&s_paged=$page"
         } else {
             "${request.data}$page"
         }
 
-        val document = app.get(url).document
+        val document = app.get(url, headers = headers, interceptor = cfInterceptor).document
         val home = document.select("article.anime-card").mapNotNull {
             it.toSearchResult()
         }.distinctBy { it.url }
@@ -47,7 +56,6 @@ class DesiDubAnimeProvider : MainAPI() {
         val titleEl = this.selectFirst("h3 a span:not([class*='jp'])") ?: this.selectFirst("h3 a")
         val title = titleEl?.text()?.trim() ?: return null
 
-        // সরাসরি /anime/ পেজের লিংক নেওয়া (যাতে সব এপিসোড লিস্ট লোড হয়)
         val infoOnclick = this.selectFirst("button[onclick*='/anime/']")?.attr("onclick")
         val animeUrlFromBtn = infoOnclick?.let {
             Regex("""window\.location\.href=['"]([^'"]+)['"]""").find(it)?.groupValues?.get(1)
@@ -66,14 +74,19 @@ class DesiDubAnimeProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/search/?s_keyword=$query").document
+        val document = app.get(
+            "$mainUrl/search/?s_keyword=$query",
+            headers = headers,
+            interceptor = cfInterceptor
+        ).document
+
         return document.select("article.anime-card").mapNotNull {
             it.toSearchResult()
         }.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url).document
+        val document = app.get(url, headers = headers, interceptor = cfInterceptor).document
 
         val title = document.selectFirst("h1 span:not([class*='jp']), h1")?.text()?.trim() ?: return null
         val poster = fixUrlNull(
@@ -81,7 +94,6 @@ class DesiDubAnimeProvider : MainAPI() {
         )
         val description = document.selectFirst("div.text-muted p, div.entry-content, p.line-clamp-3")?.text()?.trim()
 
-        // এপিসোড লিস্ট খোঁজা (/watch/ লিংকগুলো থেকে)
         val episodes = document.select("a[href*='/watch/']").mapNotNull { a ->
             val epHref = fixUrl(a.attr("href"))
             val text = a.text().trim()
@@ -97,7 +109,6 @@ class DesiDubAnimeProvider : MainAPI() {
             }
         }.distinctBy { it.data }
 
-        // যদি সরাসরি /watch/ পেজের লিংক ওপেন হয়
         val finalEpisodes = if (episodes.isEmpty() && url.contains("/watch/")) {
             listOf(newEpisode(url) {
                 this.name = "Watch"
@@ -120,9 +131,8 @@ class DesiDubAnimeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val document = app.get(data, headers = headers, interceptor = cfInterceptor).document
 
-        // পেজে থাকা সব iframe ভিডিও সোর্স লোড করা
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
             if (src.isNotBlank() && !src.contains("googletagmanager") && !src.contains("facebook")) {
@@ -130,7 +140,6 @@ class DesiDubAnimeProvider : MainAPI() {
             }
         }
 
-        // সার্ভার বাটন বা এম্বেড ডাটা থেকে লিংক বের করা
         document.select("[data-embed], [data-src], [data-url]").forEach { el ->
             val raw = el.attr("data-embed").ifEmpty { el.attr("data-src") }.ifEmpty { el.attr("data-url") }
             if (raw.isNotBlank()) {
