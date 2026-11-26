@@ -18,27 +18,47 @@ class DesiDubAnimeProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "$mainUrl/anime/page/" to "Latest Anime",
-        "$mainUrl/movies/page/" to "Anime Movies",
-        "$mainUrl/genre/action/page/" to "Action",
-        "$mainUrl/genre/adventure/page/" to "Adventure"
+        "$mainUrl/" to "Latest & Trending",
+        "$mainUrl/search/?s_orderby=updated&s_order=desc&s_type[]=tv&s_paged=" to "Latest TV Series",
+        "$mainUrl/search/?s_orderby=date&s_order=desc&s_type[]=movie&s_paged=" to "Latest Movies",
+        "$mainUrl/search/?s_orderby=popular&s_paged=" to "Most Popular",
+        "$mainUrl/tag/hindi/page/" to "Hindi Dubbed"
     )
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val document = app.get(request.data + page).document
-        val home = document.select("article.bs, div.listupd article, article.item").mapNotNull {
-            it.toSearchResult()
+        val url = if (request.data == "$mainUrl/") {
+            if (page == 1) mainUrl else "$mainUrl/search/?s_orderby=updated&s_order=desc&s_paged=$page"
+        } else {
+            "${request.data}$page"
         }
+
+        val document = app.get(url).document
+        val home = document.select("article.anime-card").mapNotNull {
+            it.toSearchResult()
+        }.distinctBy { it.url }
+
         return newHomePageResponse(request.name, home)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val title = this.selectFirst("div.tt, h2, h3, .title")?.text()?.trim() ?: return null
-        val href = fixUrl(this.selectFirst("a")?.attr("href") ?: return null)
-        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src") ?: this.selectFirst("img")?.attr("data-src"))
+        val titleEl = this.selectFirst("h3 a span:not([class*='jp'])") ?: this.selectFirst("h3 a")
+        val title = titleEl?.text()?.trim() ?: return null
+
+        // সরাসরি /anime/ পেজের লিংক নেওয়া (যাতে সব এপিসোড লিস্ট লোড হয়)
+        val infoOnclick = this.selectFirst("button[onclick*='/anime/']")?.attr("onclick")
+        val animeUrlFromBtn = infoOnclick?.let {
+            Regex("""window\.location\.href=['"]([^'"]+)['"]""").find(it)?.groupValues?.get(1)
+        }
+        val rawHref = animeUrlFromBtn ?: this.selectFirst("h3 a, a")?.attr("href") ?: return null
+        val href = fixUrl(rawHref)
+
+        val img = this.selectFirst("img")
+        val posterUrl = fixUrlNull(
+            img?.attr("src")?.ifEmpty { img.attr("data-src") }
+        )
 
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = posterUrl
@@ -46,41 +66,51 @@ class DesiDubAnimeProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/?s=$query").document
-        return document.select("article.bs, div.listupd article, article.item").mapNotNull {
+        val document = app.get("$mainUrl/search/?s_keyword=$query").document
+        return document.select("article.anime-card").mapNotNull {
             it.toSearchResult()
-        }
+        }.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url).document
-        val title = document.selectFirst("h1.entry-title, h1")?.text()?.trim() ?: return null
-        val poster = fixUrlNull(document.selectFirst("div.thumb img, div.poster img")?.attr("src"))
-        val description = document.selectFirst("div.entry-content, div.sinopsis, p")?.text()?.trim()
 
-        val episodes = document.select("div.eplister ul li, ul.episodios li").mapNotNull { ep ->
-            val a = ep.selectFirst("a") ?: return@mapNotNull null
+        val title = document.selectFirst("h1 span:not([class*='jp']), h1")?.text()?.trim() ?: return null
+        val poster = fixUrlNull(
+            document.selectFirst("div.aspect-\\[3\\/4\\] img, img.wp-post-image, main img")?.attr("src")
+        )
+        val description = document.selectFirst("div.text-muted p, div.entry-content, p.line-clamp-3")?.text()?.trim()
+
+        // এপিসোড লিস্ট খোঁজা (/watch/ লিংকগুলো থেকে)
+        val episodes = document.select("a[href*='/watch/']").mapNotNull { a ->
             val epHref = fixUrl(a.attr("href"))
-            val epName = ep.selectFirst("div.epl-title, .episodiotitle")?.text()?.trim() ?: a.text().trim()
-            val epNum = ep.selectFirst("div.epl-num, .numerando")?.text()?.filter { it.isDigit() }?.toIntOrNull()
+            val text = a.text().trim()
+            if (text.equals("Watch Now", ignoreCase = true)) return@mapNotNull null
+
+            val epNum = Regex("""(?:Episode|Ep\.?)\s*(\d+)""", RegexOption.IGNORE_CASE)
+                .find(text)?.groupValues?.get(1)?.toIntOrNull()
+                ?: Regex("""-episode-(\d+)""").find(epHref)?.groupValues?.get(1)?.toIntOrNull()
 
             newEpisode(epHref) {
-                this.name = epName
+                this.name = if (text.isNotBlank()) text else "Episode ${epNum ?: 1}"
                 this.episode = epNum
             }
-        }.reversed()
+        }.distinctBy { it.data }
 
-        return if (episodes.isNotEmpty()) {
-            newAnimeLoadResponse(title, url, TvType.Anime) {
-                this.posterUrl = poster
-                this.plot = description
-                addEpisodes(DubStatus.Dubbed, episodes)
-            }
+        // যদি সরাসরি /watch/ পেজের লিংক ওপেন হয়
+        val finalEpisodes = if (episodes.isEmpty() && url.contains("/watch/")) {
+            listOf(newEpisode(url) {
+                this.name = "Watch"
+                this.episode = 1
+            })
         } else {
-            newMovieLoadResponse(title, url, TvType.AnimeMovie, url) {
-                this.posterUrl = poster
-                this.plot = description
-            }
+            episodes
+        }
+
+        return newAnimeLoadResponse(title, url, TvType.Anime) {
+            this.posterUrl = poster
+            this.plot = description
+            addEpisodes(DubStatus.Dubbed, finalEpisodes)
         }
     }
 
@@ -92,20 +122,22 @@ class DesiDubAnimeProvider : MainAPI() {
     ): Boolean {
         val document = app.get(data).document
 
+        // পেজে থাকা সব iframe ভিডিও সোর্স লোড করা
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
-            if (src.isNotBlank()) {
+            if (src.isNotBlank() && !src.contains("googletagmanager") && !src.contains("facebook")) {
                 loadExtractor(fixUrl(src), data, subtitleCallback, callback)
             }
         }
 
-        document.select("select.mirror option, div.player-option").forEach { option ->
-            val encoded = option.attr("value").ifEmpty { option.attr("data-embed") }
-            if (encoded.isNotBlank()) {
+        // সার্ভার বাটন বা এম্বেড ডাটা থেকে লিংক বের করা
+        document.select("[data-embed], [data-src], [data-url]").forEach { el ->
+            val raw = el.attr("data-embed").ifEmpty { el.attr("data-src") }.ifEmpty { el.attr("data-url") }
+            if (raw.isNotBlank()) {
                 val decoded = try {
-                    String(Base64.decode(encoded, Base64.DEFAULT))
+                    String(Base64.decode(raw, Base64.DEFAULT))
                 } catch (e: Exception) {
-                    encoded
+                    raw
                 }
                 val iframeSrc = Regex("""src=["']([^"']+)["']""").find(decoded)?.groupValues?.get(1) ?: decoded
                 if (iframeSrc.startsWith("http")) {
