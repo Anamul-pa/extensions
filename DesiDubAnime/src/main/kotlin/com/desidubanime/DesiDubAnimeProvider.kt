@@ -18,18 +18,15 @@ class DesiDubAnimeProvider : MainAPI() {
     )
 
     private val headers = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language" to "en-US,en;q=0.9",
-        "Referer" to "$mainUrl/"
+        "User-Agent" to "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     )
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Latest & Trending",
         "$mainUrl/search/?s_orderby=updated&s_order=desc&s_paged=" to "Latest Updates",
         "$mainUrl/search/?s_orderby=date&s_order=desc&s_type[]=movie&s_paged=" to "Latest Movies",
-        "$mainUrl/search/?s_orderby=popular&s_paged=" to "Most Popular",
-        "$mainUrl/tag/hindi/page/" to "Hindi Dubbed"
+        "$mainUrl/search/?s_orderby=popular&s_paged=" to "Most Popular"
     )
 
     override suspend fun getMainPage(
@@ -42,10 +39,23 @@ class DesiDubAnimeProvider : MainAPI() {
             "${request.data}$page"
         }
 
-        val document = app.get(url, headers = headers).document
-        val home = document.select("article.anime-card").mapNotNull {
-            it.toSearchResult()
-        }.distinctBy { it.url }
+        val response = app.get(url, headers = headers)
+        val document = response.document
+        val cards = document.select("article.anime-card")
+
+        val home = if (cards.isNotEmpty()) {
+            cards.mapNotNull { it.toSearchResult() }.distinctBy { it.url }
+        } else {
+            // যদি কোনো কার্ড না পায়, তবে কেন পাচ্ছে না তা স্ক্রিনে দেখাবে
+            val pageTitle = document.title().ifEmpty { "No Title" }
+            listOf(
+                newAnimeSearchResponse(
+                    "DEBUG [${response.code}]: $pageTitle (Cards: 0)",
+                    mainUrl,
+                    TvType.Anime
+                )
+            )
+        }
 
         return newHomePageResponse(request.name, home)
     }
@@ -72,15 +82,22 @@ class DesiDubAnimeProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/search/?s_keyword=$query", headers = headers).document
-        return document.select("article.anime-card").mapNotNull {
-            it.toSearchResult()
-        }.distinctBy { it.url }
+        val response = app.get("$mainUrl/search/?s_keyword=$query", headers = headers)
+        val cards = response.document.select("article.anime-card")
+        if (cards.isEmpty()) {
+            return listOf(
+                newAnimeSearchResponse(
+                    "SEARCH DEBUG [${response.code}]: ${response.document.title()}",
+                    mainUrl,
+                    TvType.Anime
+                )
+            )
+        }
+        return cards.mapNotNull { it.toSearchResult() }.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url, headers = headers).document
-
         val title = document.selectFirst("h1 span:not([class*='jp']), h1")?.text()?.trim() ?: return null
         val poster = fixUrlNull(
             document.selectFirst("div.aspect-\\[3\\/4\\] img, img.wp-post-image, main img")?.attr("src")
