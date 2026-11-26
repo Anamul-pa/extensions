@@ -25,10 +25,10 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build Plugins
-        run: chmod +x gradlew && ./gradlew make
+        run: chmod +x gradlew && ./gradlew :DesiDubAnime:make
 
       - name: Upload Extensions Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DesiDubAnime-Extension
-          path: "**/build/*.cs3"
+          path: "DesiDubAnime/build/*.cs3"
