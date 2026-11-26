@@ -2,7 +2,6 @@ package com.desidubanime
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
@@ -18,7 +17,6 @@ class DesiDubAnimeProvider : MainAPI() {
         TvType.OVA
     )
 
-    private val cfInterceptor = CloudflareKiller()
     private val headers = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -44,7 +42,7 @@ class DesiDubAnimeProvider : MainAPI() {
             "${request.data}$page"
         }
 
-        val document = app.get(url, headers = headers, interceptor = cfInterceptor).document
+        val document = app.get(url, headers = headers).document
         val home = document.select("article.anime-card").mapNotNull {
             it.toSearchResult()
         }.distinctBy { it.url }
@@ -74,19 +72,14 @@ class DesiDubAnimeProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get(
-            "$mainUrl/search/?s_keyword=$query",
-            headers = headers,
-            interceptor = cfInterceptor
-        ).document
-
+        val document = app.get("$mainUrl/search/?s_keyword=$query", headers = headers).document
         return document.select("article.anime-card").mapNotNull {
             it.toSearchResult()
         }.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url, headers = headers, interceptor = cfInterceptor).document
+        val document = app.get(url, headers = headers).document
 
         val title = document.selectFirst("h1 span:not([class*='jp']), h1")?.text()?.trim() ?: return null
         val poster = fixUrlNull(
@@ -131,7 +124,7 @@ class DesiDubAnimeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data, headers = headers, interceptor = cfInterceptor).document
+        val document = app.get(data, headers = headers).document
 
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
