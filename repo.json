@@ -1,8 +1,8 @@
 {
-    "name": "Cloudstream providers repository",
-    "description": "Cloudstream extension Repository",
-    "manifestVersion": 1,
-    "pluginLists": [
-      "https://raw.githubusercontent.com/Anamul-pa/extensions/builds/plugins.json"
-    ]
+  "name": "Anamul Custom Repo",
+  "description": "Custom CloudStream Extensions",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/Anamul-pa/extensions/builds/plugins.json"
+  ]
 }
