@@ -34,6 +34,10 @@ class DesiDubAnimeProvider : MainAPI() {
         TvType.OVA
     )
 
+    private var cachedCookies: String = ""
+    private var cachedUserAgent: String =
+        "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
     private fun getCurrentActivity(): Activity? {
         return try {
             val activityThreadClass = Class.forName("android.app.ActivityThread")
@@ -65,8 +69,37 @@ class DesiDubAnimeProvider : MainAPI() {
         null
     }
 
+    private fun getHeaders(): Map<String, String> {
+        val cookieManager = try {
+            CookieManager.getInstance()
+        } catch (_: Exception) {
+            null
+        }
+        val currentCookie = cookieManager?.getCookie(mainUrl) ?: ""
+        if (currentCookie.isNotBlank()) {
+            cachedCookies = currentCookie
+        }
+        val map = mutableMapOf(
+            "User-Agent" to cachedUserAgent,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.9",
+            "Referer" to "$mainUrl/"
+        )
+        if (cachedCookies.isNotBlank()) {
+            map["Cookie"] = cachedCookies
+        }
+        return map
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
-    private fun loadHtmlViaWebView(targetUrl: String): String {
+    private fun loadHtmlViaWebView(targetUrl: String, forcePopup: Boolean = false): String {
+        if (!forcePopup && cachedCookies.contains("cf_clearance")) {
+            val fastDoc = app.get(targetUrl, headers = getHeaders())
+            if (fastDoc.code == 200 && !fastDoc.text.contains("Just a moment...")) {
+                return fastDoc.text
+            }
+        }
+
         val activity = getCurrentActivity()
         val ctx = activity ?: getAppContext() ?: return ""
         val latch = CountDownLatch(1)
@@ -82,7 +115,7 @@ class DesiDubAnimeProvider : MainAPI() {
                 webView = WebView(ctx).apply {
                     layoutParams = FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
-                        900
+                        800
                     )
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
@@ -90,6 +123,7 @@ class DesiDubAnimeProvider : MainAPI() {
                     settings.useWideViewPort = true
                     settings.loadWithOverviewMode = true
                     settings.cacheMode = WebSettings.LOAD_DEFAULT
+                    cachedUserAgent = settings.userAgentString ?: cachedUserAgent
                 }
 
                 cookieManager.setAcceptThirdPartyCookies(webView, true)
@@ -114,6 +148,12 @@ class DesiDubAnimeProvider : MainAPI() {
                 val checker = object : Runnable {
                     override fun run() {
                         checks++
+                        val cookies = cookieManager.getCookie(mainUrl) ?: ""
+                        if (cookies.isNotBlank()) {
+                            cachedCookies = cookies
+                            cookieManager.flush()
+                        }
+
                         webView?.evaluateJavascript("document.documentElement.outerHTML") { raw ->
                             val html = try {
                                 if (raw != null && raw != "null") {
@@ -123,18 +163,19 @@ class DesiDubAnimeProvider : MainAPI() {
                                 ""
                             }
 
-                            if (html.contains("anime-card") || html.contains("kiranime") || html.contains("entry-content") || html.contains("<iframe")) {
+                            val isReady = html.contains("anime-card") ||
+                                html.contains("kiranime") ||
+                                html.contains("entry-content") ||
+                                html.contains("<iframe") ||
+                                html.contains("episode")
+
+                            if (isReady || checks >= 20) {
                                 resultHtml = html
                                 try { dialog?.dismiss() } catch (_: Exception) {}
                                 try { webView?.destroy() } catch (_: Exception) {}
                                 latch.countDown()
-                            } else if (checks < 25) {
-                                handler.postDelayed(this, 1000)
                             } else {
-                                resultHtml = html
-                                try { dialog?.dismiss() } catch (_: Exception) {}
-                                try { webView?.destroy() } catch (_: Exception) {}
-                                latch.countDown()
+                                handler.postDelayed(this, 1000)
                             }
                         }
                     }
@@ -142,7 +183,7 @@ class DesiDubAnimeProvider : MainAPI() {
 
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
-                        handler.postDelayed(checker, 1500)
+                        handler.postDelayed(checker, 1200)
                     }
                 }
 
@@ -154,7 +195,7 @@ class DesiDubAnimeProvider : MainAPI() {
         }
 
         try {
-            latch.await(28, TimeUnit.SECONDS)
+            latch.await(25, TimeUnit.SECONDS)
         } catch (_: Exception) {
         }
         return resultHtml
@@ -275,30 +316,52 @@ class DesiDubAnimeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = fetchDocument(data)
+        val html = loadHtmlViaWebView(data, forcePopup = true)
+        val document = Jsoup.parse(html, mainUrl)
+        var foundAny = false
 
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
-            if (src.isNotBlank() && !src.contains("googletagmanager") && !src.contains("facebook")) {
+            if (src.isNotBlank() && !src.contains("googletagmanager") && !src.contains("facebook") && !src.contains("renamereptiliantrance")) {
+                foundAny = true
                 loadExtractor(fixUrl(src), data, subtitleCallback, callback)
             }
         }
 
-        document.select("[data-embed], [data-src], [data-url]").forEach { el ->
-            val raw = el.attr("data-embed").ifEmpty { el.attr("data-src") }.ifEmpty { el.attr("data-url") }
+        document.select("[data-embed], [data-src], [data-url], [data-server]").forEach { el ->
+            val raw = el.attr("data-embed")
+                .ifEmpty { el.attr("data-src") }
+                .ifEmpty { el.attr("data-url") }
+                .ifEmpty { el.attr("data-server") }
             if (raw.isNotBlank()) {
                 val decoded = try {
                     String(Base64.decode(raw, Base64.DEFAULT))
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     raw
                 }
                 val iframeSrc = Regex("""src=["']([^"']+)["']""").find(decoded)?.groupValues?.get(1) ?: decoded
                 if (iframeSrc.startsWith("http")) {
+                    foundAny = true
                     loadExtractor(iframeSrc, data, subtitleCallback, callback)
                 }
             }
         }
 
-        return true
+        val mediaMatches = Regex("""https?://[^\s"'<>\\)]+\.(?:m3u8|mp4)[^\s"'<>\\)]*""").findAll(html)
+        mediaMatches.map { it.value }.distinct().take(5).forEach { streamUrl ->
+            foundAny = true
+            callback.invoke(
+                ExtractorLink(
+                    source = this.name,
+                    name = "DesiDubAnime Stream",
+                    url = streamUrl,
+                    referer = "$mainUrl/",
+                    quality = Qualities.Unknown.value,
+                    isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
+                )
+            )
+        }
+
+        return foundAny
     }
 }
