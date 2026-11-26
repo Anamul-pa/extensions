@@ -6,7 +6,7 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
 class DesiDubAnimeProvider : MainAPI() {
-    override var mainUrl = "[https://www.desidubanime.me](https://www.desidubanime.me)"
+    override var mainUrl = "https://www.desidubanime.me"
     override var name = "DesiDubAnime"
     override val hasMainPage = true
     override var lang = "hi"
@@ -17,7 +17,6 @@ class DesiDubAnimeProvider : MainAPI() {
         TvType.OVA
     )
 
-    // Cloudflare-এর নিজস্ব JS চেক পাশ করার জন্য WebViewResolver ব্যবহার
     private val cfResolver = WebViewResolver(
         Regex("""desidubanime\.me"""),
         timeout = 15_000L
