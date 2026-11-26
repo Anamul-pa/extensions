@@ -1,21 +1,26 @@
 package com.desidubanime
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.app.AlertDialog
 import android.app.Application
-import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.json.JSONTokener
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class DesiDubAnimeProvider : MainAPI() {
     override var mainUrl = "https://www.desidubanime.me"
@@ -29,93 +34,135 @@ class DesiDubAnimeProvider : MainAPI() {
         TvType.OVA
     )
 
-    private var savedCookies: String = ""
-    private var savedUserAgent: String =
-        "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-
-    private fun getAppContext(): Context? {
+    private fun getCurrentActivity(): Activity? {
         return try {
-            val activityThread = Class.forName("android.app.ActivityThread")
-            val currentApp = activityThread.getMethod("currentApplication").invoke(null) as? Application
-            currentApp?.applicationContext
+            val activityThreadClass = Class.forName("android.app.ActivityThread")
+            val activityThread = activityThreadClass.getMethod("currentActivityThread").invoke(null)
+            val activitiesField = activityThreadClass.getDeclaredField("mActivities")
+            activitiesField.isAccessible = true
+            val activities = activitiesField.get(activityThread) as? Map<*, *> ?: return null
+            for (activityRecord in activities.values) {
+                if (activityRecord == null) continue
+                val recordClass = activityRecord.javaClass
+                val pausedField = recordClass.getDeclaredField("paused")
+                pausedField.isAccessible = true
+                if (!pausedField.getBoolean(activityRecord)) {
+                    val activityField = recordClass.getDeclaredField("activity")
+                    activityField.isAccessible = true
+                    return activityField.get(activityRecord) as? Activity
+                }
+            }
+            null
         } catch (_: Exception) {
             null
         }
     }
 
-    private fun getHeaders(): Map<String, String> {
-        val map = mutableMapOf(
-            "User-Agent" to savedUserAgent,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.9",
-            "Referer" to "$mainUrl/"
-        )
-        if (savedCookies.isNotBlank()) {
-            map["Cookie"] = savedCookies
-        }
-        return map
+    private fun getAppContext() = try {
+        val activityThread = Class.forName("android.app.ActivityThread")
+        (activityThread.getMethod("currentApplication").invoke(null) as? Application)?.applicationContext
+    } catch (_: Exception) {
+        null
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun bypassCloudflareWithWebView(targetUrl: String) {
-        val ctx = getAppContext() ?: return
-        val done = AtomicBoolean(false)
+    private fun loadHtmlViaWebView(targetUrl: String): String {
+        val activity = getCurrentActivity()
+        val ctx = activity ?: getAppContext() ?: return ""
+        val latch = CountDownLatch(1)
+        var resultHtml = ""
 
         Handler(Looper.getMainLooper()).post {
+            var dialog: AlertDialog? = null
+            var webView: WebView? = null
             try {
                 val cookieManager = CookieManager.getInstance()
                 cookieManager.setAcceptCookie(true)
 
-                val webView = WebView(ctx)
-                val settings: WebSettings = webView.settings
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.databaseEnabled = true
-                savedUserAgent = settings.userAgentString ?: savedUserAgent
+                webView = WebView(ctx).apply {
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        900
+                    )
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.databaseEnabled = true
+                    settings.useWideViewPort = true
+                    settings.loadWithOverviewMode = true
+                    settings.cacheMode = WebSettings.LOAD_DEFAULT
+                }
 
-                webView.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        val cookies = cookieManager.getCookie(mainUrl) ?: ""
-                        val pageTitle = view?.title ?: ""
-                        if (cookies.contains("cf_clearance") || (!pageTitle.contains("Just a moment") && pageTitle.isNotBlank())) {
-                            savedCookies = cookies
-                            done.set(true)
+                cookieManager.setAcceptThirdPartyCookies(webView, true)
+
+                if (activity != null && !activity.isFinishing) {
+                    val container = FrameLayout(activity)
+                    container.addView(webView)
+                    dialog = AlertDialog.Builder(activity)
+                        .setTitle("Verifying DesiDubAnime...")
+                        .setView(container)
+                        .setCancelable(true)
+                        .setOnCancelListener {
+                            latch.countDown()
+                        }
+                        .create()
+                    dialog?.show()
+                }
+
+                val handler = Handler(Looper.getMainLooper())
+                var checks = 0
+
+                val checker = object : Runnable {
+                    override fun run() {
+                        checks++
+                        webView?.evaluateJavascript("document.documentElement.outerHTML") { raw ->
+                            val html = try {
+                                if (raw != null && raw != "null") {
+                                    JSONTokener(raw).nextValue().toString()
+                                } else ""
+                            } catch (_: Exception) {
+                                ""
+                            }
+
+                            if (html.contains("anime-card") || html.contains("kiranime") || html.contains("entry-content") || html.contains("<iframe")) {
+                                resultHtml = html
+                                try { dialog?.dismiss() } catch (_: Exception) {}
+                                try { webView?.destroy() } catch (_: Exception) {}
+                                latch.countDown()
+                            } else if (checks < 25) {
+                                handler.postDelayed(this, 1000)
+                            } else {
+                                resultHtml = html
+                                try { dialog?.dismiss() } catch (_: Exception) {}
+                                try { webView?.destroy() } catch (_: Exception) {}
+                                latch.countDown()
+                            }
                         }
                     }
                 }
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        handler.postDelayed(checker, 1500)
+                    }
+                }
+
                 webView.loadUrl(targetUrl)
             } catch (_: Exception) {
-                done.set(true)
+                try { dialog?.dismiss() } catch (_: Exception) {}
+                latch.countDown()
             }
         }
 
-        var waited = 0
-        while (!done.get() && waited < 15000) {
-            try {
-                Thread.sleep(500)
-            } catch (_: Exception) {
-                break
-            }
-            waited += 500
-            val currentCookies = try {
-                CookieManager.getInstance().getCookie(mainUrl) ?: ""
-            } catch (_: Exception) {
-                ""
-            }
-            if (currentCookies.contains("cf_clearance")) {
-                savedCookies = currentCookies
-                break
-            }
+        try {
+            latch.await(28, TimeUnit.SECONDS)
+        } catch (_: Exception) {
         }
+        return resultHtml
     }
 
-    private suspend fun fetchDocument(url: String): Document {
-        var res = app.get(url, headers = getHeaders())
-        if (res.code == 403 || res.text.contains("Just a moment...")) {
-            bypassCloudflareWithWebView(url)
-            res = app.get(url, headers = getHeaders())
-        }
-        return Jsoup.parse(res.text, mainUrl)
+    private fun fetchDocument(url: String): Document {
+        val html = loadHtmlViaWebView(url)
+        return Jsoup.parse(html, mainUrl)
     }
 
     override val mainPage = mainPageOf(
@@ -145,7 +192,7 @@ class DesiDubAnimeProvider : MainAPI() {
         } else {
             listOf(
                 newAnimeSearchResponse(
-                    "CF STATUS: ${document.title().ifEmpty { "No Cards" }}",
+                    "WEBVIEW: ${document.title().ifEmpty { "Timeout/Empty" }}",
                     mainUrl,
                     TvType.Anime
                 )
