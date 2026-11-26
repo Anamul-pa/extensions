@@ -1,10 +1,18 @@
 package com.desidubanime
 
+import android.annotation.SuppressLint
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
+import android.webkit.CookieManager
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.json.JSONArray
+import kotlinx.coroutines.delay
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class DesiDubAnimeProvider : MainAPI() {
@@ -19,90 +27,115 @@ class DesiDubAnimeProvider : MainAPI() {
         TvType.OVA
     )
 
-    private val headers = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept" to "application/json, text/html, */*;q=0.8",
-        "Accept-Language" to "en-US,en;q=0.9",
-        "Referer" to "$mainUrl/",
-        "Origin" to mainUrl
-    )
+    private var savedCookies: String = ""
+    private var savedUserAgent: String =
+        "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
+    private fun getHeaders(): Map<String, String> {
+        val map = mutableMapOf(
+            "User-Agent" to savedUserAgent,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.9",
+            "Referer" to "$mainUrl/"
+        )
+        if (savedCookies.isNotBlank()) {
+            map["Cookie"] = savedCookies
+        }
+        return map
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun bypassCloudflareWithWebView(targetUrl: String) {
+        val ctx = AcraApplication.context ?: return
+        var done = false
+
+        Handler(Looper.getMainLooper()).post {
+            try {
+                val cookieManager = CookieManager.getInstance()
+                cookieManager.setAcceptCookie(true)
+
+                val webView = WebView(ctx)
+                val settings: WebSettings = webView.settings
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.databaseEnabled = true
+                savedUserAgent = settings.userAgentString ?: savedUserAgent
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        val cookies = cookieManager.getCookie(mainUrl) ?: ""
+                        if (cookies.contains("cf_clearance") || (view?.title?.contains("Just a moment") == false && view.title?.isNotBlank() == true)) {
+                            savedCookies = cookies
+                            done = true
+                        }
+                    }
+                }
+                webView.loadUrl(targetUrl)
+            } catch (_: Exception) {
+                done = true
+            }
+        }
+
+        var waited = 0
+        while (!done && waited < 15000) {
+            delay(500)
+            waited += 500
+            val currentCookies = try {
+                CookieManager.getInstance().getCookie(mainUrl) ?: ""
+            } catch (_: Exception) {
+                ""
+            }
+            if (currentCookies.contains("cf_clearance")) {
+                savedCookies = currentCookies
+                break
+            }
+        }
+    }
+
+    private suspend fun fetchDocument(url: String): Document {
+        var res = app.get(url, headers = getHeaders())
+        if (res.code == 403 || res.text.contains("Just a moment...")) {
+            bypassCloudflareWithWebView(url)
+            res = app.get(url, headers = getHeaders())
+        }
+        return Jsoup.parse(res.text, mainUrl)
+    }
 
     override val mainPage = mainPageOf(
-        "latest" to "Latest & Trending",
-        "popular" to "Most Popular",
-        "wp_api" to "All Anime List"
+        "$mainUrl/" to "Latest & Trending",
+        "$mainUrl/search/?s_orderby=updated&s_order=desc&s_paged=" to "Latest Updates",
+        "$mainUrl/search/?s_orderby=date&s_order=desc&s_type[]=movie&s_paged=" to "Latest Movies",
+        "$mainUrl/search/?s_orderby=popular&s_paged=" to "Most Popular"
     )
-
-    private fun parseWpJsonList(jsonText: String): List<SearchResponse> {
-        val results = mutableListOf<SearchResponse>()
-        try {
-            val array = JSONArray(jsonText)
-            for (i in 0 until array.length()) {
-                val obj = array.optJSONObject(i) ?: continue
-                val link = obj.optString("link")
-                val titleObj = obj.optJSONObject("title")
-                val rawTitle = titleObj?.optString("rendered") ?: continue
-                if (link.isBlank() || rawTitle.isBlank()) continue
-
-                val cleanTitle = Jsoup.parse(rawTitle).text().trim()
-                val poster = obj.optString("jetpack_featured_media_url").ifBlank { null }
-
-                results.add(
-                    newAnimeSearchResponse(cleanTitle, fixUrl(link), TvType.Anime) {
-                        this.posterUrl = fixUrlNull(poster)
-                    }
-                )
-            }
-        } catch (_: Exception) {
-        }
-        return results
-    }
 
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val pageUrl = when (request.data) {
-            "latest" -> if (page == 1) "$mainUrl/" else "$mainUrl/search/?s_orderby=updated&s_order=desc&s_paged=$page"
-            "popular" -> "$mainUrl/search/?s_orderby=popular&s_paged=$page"
-            else -> "$mainUrl/search/?s_paged=$page"
+        val url = if (request.data == "$mainUrl/") {
+            if (page == 1) "$mainUrl/" else "$mainUrl/search/?s_orderby=updated&s_order=desc&s_paged=$page"
+        } else {
+            "${request.data}$page"
         }
 
-        val webRes = app.get(pageUrl, headers = headers)
-        if (webRes.code == 200) {
-            val cards = webRes.document.select("article.anime-card").mapNotNull {
-                it.toSearchResult()
-            }.distinctBy { it.url }
-            if (cards.isNotEmpty()) {
-                return newHomePageResponse(request.name, cards)
-            }
-        }
+        val document = fetchDocument(url)
+        val cards = document.select("article.anime-card").mapNotNull {
+            it.toSearchResult()
+        }.distinctBy { it.url }
 
-        val apiEndpoints = listOf(
-            "$mainUrl/wp-json/wp/v2/anime?per_page=20&page=$page",
-            "$mainUrl/wp-json/wp/v2/posts?per_page=20&page=$page"
-        )
-
-        for (apiUrl in apiEndpoints) {
-            val apiRes = app.get(apiUrl, headers = headers)
-            if (apiRes.code == 200 && apiRes.text.trim().startsWith("[")) {
-                val mapped = parseWpJsonList(apiRes.text)
-                if (mapped.isNotEmpty()) {
-                    return newHomePageResponse(request.name, mapped)
-                }
-            }
-        }
-
-        return newHomePageResponse(
-            request.name,
+        val home = if (cards.isNotEmpty()) {
+            cards
+        } else {
             listOf(
                 newAnimeSearchResponse(
-                    "BLOCKED [${webRes.code}]: Site requires browser cookie",
+                    "CF STATUS: ${document.title().ifEmpty { "No Cards" }}",
                     mainUrl,
                     TvType.Anime
                 )
             )
-        )
+        }
+
+        return newHomePageResponse(request.name, home)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -127,23 +160,14 @@ class DesiDubAnimeProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val webRes = app.get("$mainUrl/search/?s_keyword=$query", headers = headers)
-        if (webRes.code == 200) {
-            val cards = webRes.document.select("article.anime-card").mapNotNull {
-                it.toSearchResult()
-            }.distinctBy { it.url }
-            if (cards.isNotEmpty()) return cards
-        }
-
-        val apiRes = app.get("$mainUrl/wp-json/wp/v2/anime?search=$query&per_page=20", headers = headers)
-        if (apiRes.code == 200 && apiRes.text.trim().startsWith("[")) {
-            return parseWpJsonList(apiRes.text)
-        }
-        return emptyList()
+        val document = fetchDocument("$mainUrl/search/?s_keyword=$query")
+        return document.select("article.anime-card").mapNotNull {
+            it.toSearchResult()
+        }.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url, headers = headers).document
+        val document = fetchDocument(url)
         val title = document.selectFirst("h1 span:not([class*='jp']), h1")?.text()?.trim() ?: return null
         val poster = fixUrlNull(
             document.selectFirst("div.aspect-\\[3\\/4\\] img, img.wp-post-image, main img")?.attr("src")
@@ -187,7 +211,7 @@ class DesiDubAnimeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data, headers = headers).document
+        val document = fetchDocument(data)
 
         document.select("iframe").forEach { iframe ->
             val src = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
