@@ -92,7 +92,7 @@ class DesiDubAnimeProvider : MainAPI() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun loadHtmlViaWebView(targetUrl: String, forcePopup: Boolean = false): String {
+    private suspend fun loadHtmlViaWebView(targetUrl: String, forcePopup: Boolean = false): String {
         if (!forcePopup && cachedCookies.contains("cf_clearance")) {
             val fastDoc = app.get(targetUrl, headers = getHeaders())
             if (fastDoc.code == 200 && !fastDoc.text.contains("Just a moment...")) {
@@ -201,7 +201,7 @@ class DesiDubAnimeProvider : MainAPI() {
         return resultHtml
     }
 
-    private fun fetchDocument(url: String): Document {
+    private suspend fun fetchDocument(url: String): Document {
         val html = loadHtmlViaWebView(url)
         return Jsoup.parse(html, mainUrl)
     }
@@ -351,14 +351,15 @@ class DesiDubAnimeProvider : MainAPI() {
         mediaMatches.map { it.value }.distinct().take(5).forEach { streamUrl ->
             foundAny = true
             callback.invoke(
-                ExtractorLink(
-                    source = this.name,
-                    name = "DesiDubAnime Stream",
-                    url = streamUrl,
-                    referer = "$mainUrl/",
-                    quality = Qualities.Unknown.value,
-                    isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
-                )
+                newExtractorLink(
+                    this.name,
+                    "DesiDubAnime Stream",
+                    streamUrl,
+                    type = if (streamUrl.contains(".m3u8", ignoreCase = true)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = "$mainUrl/"
+                    this.quality = Qualities.Unknown.value
+                }
             )
         }
 
