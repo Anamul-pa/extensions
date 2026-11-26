@@ -3,7 +3,8 @@ package com.desidubanime
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import org.json.JSONArray
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class DesiDubAnimeProvider : MainAPI() {
@@ -26,20 +27,36 @@ class DesiDubAnimeProvider : MainAPI() {
         "Origin" to mainUrl
     )
 
-    data class WpRendered(val rendered: String? = null)
-    data class WpAnimeItem(
-        val id: Int? = null,
-        val link: String? = null,
-        val title: WpRendered? = null,
-        val content: WpRendered? = null,
-        val jetpack_featured_media_url: String? = null
-    )
-
     override val mainPage = mainPageOf(
         "latest" to "Latest & Trending",
         "popular" to "Most Popular",
         "wp_api" to "All Anime List"
     )
+
+    private fun parseWpJsonList(jsonText: String): List<SearchResponse> {
+        val results = mutableListOf<SearchResponse>()
+        try {
+            val array = JSONArray(jsonText)
+            for (i in 0 until array.length()) {
+                val obj = array.optJSONObject(i) ?: continue
+                val link = obj.optString("link")
+                val titleObj = obj.optJSONObject("title")
+                val rawTitle = titleObj?.optString("rendered") ?: continue
+                if (link.isBlank() || rawTitle.isBlank()) continue
+
+                val cleanTitle = Jsoup.parse(rawTitle).text().trim()
+                val poster = obj.optString("jetpack_featured_media_url").ifBlank { null }
+
+                results.add(
+                    newAnimeSearchResponse(cleanTitle, fixUrl(link), TvType.Anime) {
+                        this.posterUrl = fixUrlNull(poster)
+                    }
+                )
+            }
+        } catch (_: Exception) {
+        }
+        return results
+    }
 
     override suspend fun getMainPage(
         page: Int,
@@ -69,23 +86,9 @@ class DesiDubAnimeProvider : MainAPI() {
         for (apiUrl in apiEndpoints) {
             val apiRes = app.get(apiUrl, headers = headers)
             if (apiRes.code == 200 && apiRes.text.trim().startsWith("[")) {
-                val items = try {
-                    parseJson<List<WpAnimeItem>>(apiRes.text)
-                } catch (e: Exception) {
-                    emptyList()
-                }
-                if (items.isNotEmpty()) {
-                    val mapped = items.mapNotNull { item ->
-                        val rawTitle = item.title?.rendered ?: return@mapNotNull null
-                        val cleanTitle = org.jsoup.Jsoup.parse(rawTitle).text().trim()
-                        val itemUrl = item.link ?: return@mapNotNull null
-                        newAnimeSearchResponse(cleanTitle, fixUrl(itemUrl), TvType.Anime) {
-                            this.posterUrl = fixUrlNull(item.jetpack_featured_media_url)
-                        }
-                    }
-                    if (mapped.isNotEmpty()) {
-                        return newHomePageResponse(request.name, mapped)
-                    }
+                val mapped = parseWpJsonList(apiRes.text)
+                if (mapped.isNotEmpty()) {
+                    return newHomePageResponse(request.name, mapped)
                 }
             }
         }
@@ -134,21 +137,80 @@ class DesiDubAnimeProvider : MainAPI() {
 
         val apiRes = app.get("$mainUrl/wp-json/wp/v2/anime?search=$query&per_page=20", headers = headers)
         if (apiRes.code == 200 && apiRes.text.trim().startsWith("[")) {
-            return try {
-                parseJson<List<WpAnimeItem>>(apiRes.text).mapNotNull { item ->
-                    val cleanTitle = org.jsoup.Jsoup.parse(item.title?.rendered ?: return@mapNotNull null).text().trim()
-                    val itemUrl = item.link ?: return@mapNotNull null
-                    newAnimeSearchResponse(cleanTitle, fixUrl(itemUrl), TvType.Anime) {
-                        this.posterUrl = fixUrlNull(item.jetpack_featured_media_url)
-                    }
-                }
-            } catch (e: Exception) {
-                emptyList()
-            }
+            return parseWpJsonList(apiRes.text)
         }
         return emptyList()
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url, headers = headers).document
-        val title = document.selectFirst("h1 span:not([class*='jp']), h1")?.text()?.trim()
+        val title = document.selectFirst("h1 span:not([class*='jp']), h1")?.text()?.trim() ?: return null
+        val poster = fixUrlNull(
+            document.selectFirst("div.aspect-\\[3\\/4\\] img, img.wp-post-image, main img")?.attr("src")
+        )
+        val description = document.selectFirst("div.text-muted p, div.entry-content, p.line-clamp-3")?.text()?.trim()
+
+        val episodes = document.select("a[href*='/watch/']").mapNotNull { a ->
+            val epHref = fixUrl(a.attr("href"))
+            val text = a.text().trim()
+            if (text.equals("Watch Now", ignoreCase = true)) return@mapNotNull null
+
+            val epNum = Regex("""(?:Episode|Ep\.?)\s*(\d+)""", RegexOption.IGNORE_CASE)
+                .find(text)?.groupValues?.get(1)?.toIntOrNull()
+                ?: Regex("""-episode-(\d+)""").find(epHref)?.groupValues?.get(1)?.toIntOrNull()
+
+            newEpisode(epHref) {
+                this.name = if (text.isNotBlank()) text else "Episode ${epNum ?: 1}"
+                this.episode = epNum
+            }
+        }.distinctBy { it.data }
+
+        val finalEpisodes = if (episodes.isEmpty() && url.contains("/watch/")) {
+            listOf(newEpisode(url) {
+                this.name = "Watch"
+                this.episode = 1
+            })
+        } else {
+            episodes
+        }
+
+        return newAnimeLoadResponse(title, url, TvType.Anime) {
+            this.posterUrl = poster
+            this.plot = description
+            addEpisodes(DubStatus.Dubbed, finalEpisodes)
+        }
+    }
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val document = app.get(data, headers = headers).document
+
+        document.select("iframe").forEach { iframe ->
+            val src = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
+            if (src.isNotBlank() && !src.contains("googletagmanager") && !src.contains("facebook")) {
+                loadExtractor(fixUrl(src), data, subtitleCallback, callback)
+            }
+        }
+
+        document.select("[data-embed], [data-src], [data-url]").forEach { el ->
+            val raw = el.attr("data-embed").ifEmpty { el.attr("data-src") }.ifEmpty { el.attr("data-url") }
+            if (raw.isNotBlank()) {
+                val decoded = try {
+                    String(Base64.decode(raw, Base64.DEFAULT))
+                } catch (e: Exception) {
+                    raw
+                }
+                val iframeSrc = Regex("""src=["']([^"']+)["']""").find(decoded)?.groupValues?.get(1) ?: decoded
+                if (iframeSrc.startsWith("http")) {
+                    loadExtractor(iframeSrc, data, subtitleCallback, callback)
+                }
+            }
+        }
+
+        return true
+    }
+}
