@@ -47,7 +47,7 @@ jobs:
               "language": "hi",
               "authors": ["Custom"],
               "tvTypes": ["Anime", "AnimeMovie", "OVA"],
-              "version": 5,
+              "version": 6,
               "internalName": "DesiDubAnime",
               "description": "Hindi Dubbed Anime from DesiDubAnime",
               "url": "https://raw.githubusercontent.com/Anamul-pa/extensions/builds/DesiDubAnime.cs3",
