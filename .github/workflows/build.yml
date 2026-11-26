@@ -47,7 +47,7 @@ jobs:
               "language": "hi",
               "authors": ["Custom"],
               "tvTypes": ["Anime", "AnimeMovie", "OVA"],
-              "version": 1,
+              "version": 2,
               "internalName": "DesiDubAnime",
               "description": "Hindi Dubbed Anime from DesiDubAnime",
               "url": "https://raw.githubusercontent.com/Anamul-pa/extensions/builds/DesiDubAnime.cs3",
@@ -59,5 +59,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Update DesiDubAnime plugin" || exit 0
+          git commit -m "Update DesiDubAnime plugin to v2" || exit 0
           git push
