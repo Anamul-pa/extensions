@@ -1,6 +1,7 @@
 package com.flaxfer
 
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.databind.JsonNode
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
@@ -54,39 +55,12 @@ class FlaxferProvider : MainAPI() {
         @JsonProperty("total_pages") val totalPages: Int? = null
     )
 
-    data class DirectStreamItem(
-        @JsonProperty("url") val url: String? = null,
-        @JsonProperty("proxied_url") val proxiedUrl: String? = null,
-        @JsonProperty("download_url") val downloadUrl: String? = null,
-        @JsonProperty("provider") val provider: String? = null,
-        @JsonProperty("server") val server: String? = null,
-        @JsonProperty("quality") val quality: String? = null,
-        @JsonProperty("resolution") val resolution: String? = null,
-        @JsonProperty("format") val format: String? = null,
-        @JsonProperty("type") val type: String? = null
-    )
-
-    data class DirectSubtitleItem(
-        @JsonProperty("url") val url: String? = null,
-        @JsonProperty("label") val label: String? = null,
-        @JsonProperty("language") val language: String? = null,
-        @JsonProperty("lang") val lang: String? = null
-    )
-
-    data class DirectResolveResponse(
-        @JsonProperty("ok") val ok: Boolean? = null,
-        @JsonProperty("streams") val streams: List<DirectStreamItem>? = null,
-        @JsonProperty("sources") val sources: List<DirectStreamItem>? = null,
-        @JsonProperty("downloads") val downloads: List<DirectStreamItem>? = null,
-        @JsonProperty("subtitles") val subtitles: List<DirectSubtitleItem>? = null,
-        @JsonProperty("url") val url: String? = null
-    )
-
     private fun TmdbItem.toSearchResponse(): SearchResponse? {
         val itemId = id ?: return null
         if (mediaType.equals("person", ignoreCase = true)) return null
         val itemTitle = (title ?: name)?.takeIf { it.isNotBlank() } ?: return null
-        val isTv = mediaType.equals("tv", ignoreCase = true) || (!mediaType.equals("movie", ignoreCase = true) && firstAirDate != null && releaseDate == null)
+        val isTv = mediaType.equals("tv", ignoreCase = true) ||
+            (!mediaType.equals("movie", ignoreCase = true) && firstAirDate != null && releaseDate == null)
         val href = if (isTv) "$mainUrl/tv/$itemId" else "$mainUrl/movie/$itemId"
         val poster = posterPath?.let { "$imgBase/w500$it" }
         return if (isTv) {
@@ -189,6 +163,64 @@ class FlaxferProvider : MainAPI() {
         }
     }
 
+    private fun extractMediaUrlsFromNode(node: JsonNode?, out: MutableList<Triple<String, String?, String?>>, hintLabel: String) {
+        if (node == null || node.isNull) return
+        when {
+            node.isTextual -> {
+                val txt = node.asText().trim()
+                if (txt.startsWith("http") &&
+                    (txt.contains(".m3u8", ignoreCase = true) ||
+                        txt.contains(".mp4", ignoreCase = true) ||
+                        txt.contains("/hls/", ignoreCase = true) ||
+                        txt.contains("/api/", ignoreCase = true) ||
+                        txt.contains("stream", ignoreCase = true) ||
+                        txt.contains("proxy", ignoreCase = true)) &&
+                    !txt.contains("image.tmdb.org", ignoreCase = true) &&
+                    !txt.endsWith(".jpg", ignoreCase = true) &&
+                    !txt.endsWith(".png", ignoreCase = true) &&
+                    !txt.endsWith(".webp", ignoreCase = true)
+                ) {
+                    out.add(Triple(txt, null, null))
+                }
+            }
+            node.isArray -> {
+                for (child in node) {
+                    extractMediaUrlsFromNode(child, out, hintLabel)
+                }
+            }
+            node.isObject -> {
+                val label = node.path("provider").asText("")
+                    .ifBlank { node.path("server").asText("") }
+                    .ifBlank { hintLabel }
+                val quality = node.path("quality").asText("")
+                    .ifBlank { node.path("resolution").asText("") }
+                    .ifBlank { null }
+
+                val priorityKeys = listOf(
+                    "proxied_url", "download_url", "manifestUrl", "manifest_url",
+                    "streamUrl", "stream_url", "directPlayUrl", "url", "src",
+                    "file", "video", "video_url", "link", "source"
+                )
+                for (k in priorityKeys) {
+                    if (node.has(k) && node.get(k).isTextual) {
+                        val u = node.get(k).asText().trim()
+                        if (u.startsWith("http") && !u.contains("image.tmdb.org", ignoreCase = true)) {
+                            out.add(Triple(u, label, quality))
+                        }
+                    }
+                }
+
+                val fields = node.fields()
+                while (fields.hasNext()) {
+                    val entry = fields.next()
+                    if (entry.key !in listOf("poster", "backdrop", "image", "thumbnail", "subtitle", "subtitles", "subs", "captions")) {
+                        extractMediaUrlsFromNode(entry.value, out, label)
+                    }
+                }
+            }
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -204,14 +236,14 @@ class FlaxferProvider : MainAPI() {
         val seenUrls = mutableSetOf<String>()
         var addedCount = 0
 
-        suspend fun emitDirectLink(rawUrl: String?, sourceLabel: String, qualityStr: String?, formatStr: String?) {
+        suspend fun emitStream(rawUrl: String?, sourceLabel: String, qualityStr: String?) {
             val cleanUrl = rawUrl?.trim()?.takeIf { it.startsWith("http") } ?: return
             if (!seenUrls.add(cleanUrl)) return
 
             val qInt = Regex("(\\d{3,4})").find(qualityStr ?: "")?.groupValues?.getOrNull(1)?.toIntOrNull()
                 ?: Qualities.Unknown.value
-            val isHls = formatStr.equals("hls", ignoreCase = true) ||
-                cleanUrl.contains(".m3u8", ignoreCase = true) ||
+            val isHls = cleanUrl.contains(".m3u8", ignoreCase = true) ||
+                cleanUrl.contains(".m3u", ignoreCase = true) ||
                 cleanUrl.contains("/hls/", ignoreCase = true)
 
             callback.invoke(
@@ -228,14 +260,15 @@ class FlaxferProvider : MainAPI() {
             addedCount++
         }
 
-        val directEndpoints = if (isTv) {
+        val endpoints = if (isTv) {
             listOf(
                 "Astra" to "https://astra0.thatis3word.dev/api/resolve?type=tv&id=$id&s=$s&e=$e",
                 "CineBros" to "https://altra0.forilas852.workers.dev/cinebros/api/tv/$id/$s/$e",
                 "VZ Cloud" to "https://api.vz.raphsm4.dev/resolve?id=$id&type=tv&season=$s&episode=$e",
                 "MVSNerd" to "https://mvsnerd.namitutu5.workers.dev/tv/$id/$s/$e",
+                "MVSNerd 2" to "https://plain-sun-7323.karloswnso.workers.dev/tv/$id/$s/$e",
                 "VidSpark" to "https://alexamuf.xyz/vs/tv/$id/$s/$e",
-                "MovieBox MP4" to "https://themoviebox.uk/download/tv/$id/$s/$e",
+                "MovieBox" to "https://themoviebox.uk/download/tv/$id/$s/$e",
                 "Flix2Watch" to "https://flix2watch.pro/api/tv/$id/$s/$e"
             )
         } else {
@@ -244,46 +277,71 @@ class FlaxferProvider : MainAPI() {
                 "CineBros" to "https://altra0.forilas852.workers.dev/cinebros/api/movie/$id",
                 "VZ Cloud" to "https://api.vz.raphsm4.dev/resolve?id=$id&type=movie",
                 "MVSNerd" to "https://mvsnerd.namitutu5.workers.dev/movie/$id",
+                "MVSNerd 2" to "https://plain-sun-7323.karloswnso.workers.dev/movie/$id",
                 "VidSpark" to "https://alexamuf.xyz/vs/movie/$id",
-                "MovieBox MP4" to "https://themoviebox.uk/download/movie/$id",
+                "MovieBox" to "https://themoviebox.uk/download/movie/$id",
                 "Flix2Watch" to "https://flix2watch.pro/api/movie/$id"
             )
         }
 
-        directEndpoints.amap { (providerLabel, apiUrl) ->
+        endpoints.amap { (providerLabel, apiUrl) ->
             try {
-                val res = app.get(apiUrl, timeout = 12).parsedSafe<DirectResolveResponse>() ?: return@amap
-                res.subtitles?.forEach { sub ->
-                    val subUrl = sub.url?.takeIf { it.startsWith("http") } ?: return@forEach
-                    val subName = sub.label ?: sub.language ?: sub.lang ?: "English"
-                    subtitleCallback.invoke(SubtitleFile(subName, subUrl))
+                val rawText = app.get(apiUrl, timeout = 12).text
+                if (rawText.isBlank()) return@amap
+
+                val jsonNode = try {
+                    jacksonObjectMapper().readTree(rawText)
+                } catch (_: Exception) {
+                    null
                 }
-                val combined = (res.streams ?: emptyList()) + (res.sources ?: emptyList()) + (res.downloads ?: emptyList())
-                combined.forEach { item ->
-                    val finalUrl = item.proxiedUrl ?: item.downloadUrl ?: item.url
-                    val label = item.provider?.takeIf { it.isNotBlank() } ?: providerLabel
-                    emitDirectLink(finalUrl, "$name - $label", item.quality ?: item.resolution, item.format ?: item.type)
-                }
-                if (!res.url.isNullOrBlank()) {
-                    emitDirectLink(res.url, "$name - $providerLabel", "HD", null)
+
+                if (jsonNode != null) {
+                    val found = mutableListOf<Triple<String, String?, String?>>()
+                    extractMediaUrlsFromNode(jsonNode, found, providerLabel)
+                    found.forEach { (u, lbl, q) ->
+                        emitStream(u, "$name - ${lbl ?: providerLabel}", q)
+                    }
+
+                    val subsNode = jsonNode.path("subtitles")
+                    if (subsNode.isArray) {
+                        for (sub in subsNode) {
+                            val subUrl = sub.path("url").asText("").trim()
+                            if (subUrl.startsWith("http")) {
+                                val subLabel = sub.path("label").asText("")
+                                    .ifBlank { sub.path("language").asText("") }
+                                    .ifBlank { "English" }
+                                subtitleCallback.invoke(newSubtitleFile(subLabel, subUrl))
+                            }
+                        }
+                    }
+                } else {
+                    Regex("https?://[^\\s\"'<>\\\\]+\\.(?:m3u8|mp4)(?:\\?[^\\s\"'<>\\\\]*)?", RegexOption.IGNORE_CASE)
+                        .findAll(rawText)
+                        .forEach { match ->
+                            emitStream(match.value, "$name - $providerLabel", null)
+                        }
                 }
             } catch (_: Exception) {
             }
         }
 
-        val embedUrls = if (isTv) {
+        val embedTargets = if (isTv) {
             listOf(
                 "https://vidlink.pro/tv/$id/$s/$e",
-                "https://vixsrc.to/tv/$id/$s/$e/"
+                "https://vixsrc.to/tv/$id/$s/$e/",
+                "https://freemoviesstreaming.site/embed/tv/$id/$s/$e",
+                "https://flaxmovies.xyz/embed/tv/$id/$s/$e"
             )
         } else {
             listOf(
                 "https://vidlink.pro/movie/$id",
-                "https://vixsrc.to/movie/$id"
+                "https://vixsrc.to/movie/$id",
+                "https://freemoviesstreaming.site/embed/movie/$id",
+                "https://flaxmovies.xyz/embed/movie/$id"
             )
         }
 
-        embedUrls.amap { embedUrl ->
+        embedTargets.amap { embedUrl ->
             try {
                 if (loadExtractor(embedUrl, "$mainUrl/", subtitleCallback, callback)) {
                     addedCount++
