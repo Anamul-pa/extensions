@@ -24,8 +24,8 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build DesiDubAnime Only
-        run: chmod +x gradlew && ./gradlew :DesiDubAnime:make
+      - name: Build NovaHdProvider Only
+        run: chmod +x gradlew && ./gradlew :NovaHdProvider:make
 
       - name: Checkout builds branch
         uses: actions/checkout@v4
@@ -35,23 +35,23 @@ jobs:
 
       - name: Copy CS3 and Generate plugins.json
         run: |
-          cp -f DesiDubAnime/build/*.cs3 temp_builds/
+          rm -f temp_builds/*.cs3
+          cp -f NovaHdProvider/build/*.cs3 temp_builds/
           cat << 'EOF' > temp_builds/plugins.json
           [
             {
-              "iconUrl": "https://www.google.com/s2/favicons?domain=desidubanime.me&sz=%size%",
               "apiVersion": 1,
               "repositoryUrl": "https://github.com/Anamul-pa/extensions",
               "fileSize": 10000,
               "status": 1,
-              "language": "hi",
-              "authors": ["Custom"],
-              "tvTypes": ["Anime", "AnimeMovie", "OVA"],
-              "version": 7,
-              "internalName": "DesiDubAnime",
-              "description": "Hindi Dubbed Anime from DesiDubAnime",
-              "url": "https://raw.githubusercontent.com/Anamul-pa/extensions/builds/DesiDubAnime.cs3",
-              "name": "DesiDubAnime"
+              "language": "en",
+              "authors": ["Anamul"],
+              "tvTypes": ["Movie", "TvSeries"],
+              "version": 1,
+              "internalName": "NovaHdProvider",
+              "description": "NovaHD Movies and TV Series Provider",
+              "url": "https://raw.githubusercontent.com/Anamul-pa/extensions/builds/NovaHdProvider.cs3",
+              "name": "NovaHdProvider"
             }
           ]
           EOF
@@ -59,5 +59,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "Update DesiDubAnime plugin to v7" || exit 0
+          git commit -m "Add NovaHdProvider v1" || exit 0
           git push -f origin builds
