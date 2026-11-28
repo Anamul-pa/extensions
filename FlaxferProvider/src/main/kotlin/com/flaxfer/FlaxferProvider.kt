@@ -3,6 +3,8 @@ package com.flaxfer
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.URLEncoder
 
 class FlaxferProvider : MainAPI() {
@@ -162,16 +164,16 @@ class FlaxferProvider : MainAPI() {
         }
     }
 
-    private fun extractUrlsRecursive(
-        value: Any?,
+    private fun extractFromJsonAny(
+        anyObj: Any?,
         out: MutableList<Triple<String, String?, String?>>,
         hintLabel: String,
         hintQuality: String?
     ) {
-        if (value == null) return
-        when (value) {
+        if (anyObj == null || anyObj == JSONObject.NULL) return
+        when (anyObj) {
             is String -> {
-                val txt = value.trim()
+                val txt = anyObj.trim()
                 if (txt.startsWith("http") &&
                     (txt.contains(".m3u8", ignoreCase = true) ||
                         txt.contains(".mp4", ignoreCase = true) ||
@@ -186,16 +188,19 @@ class FlaxferProvider : MainAPI() {
                     out.add(Triple(txt, hintLabel, hintQuality))
                 }
             }
-            is List<*> -> {
-                for (item in value) {
-                    extractUrlsRecursive(item, out, hintLabel, hintQuality)
+            is JSONArray -> {
+                for (i in 0 until anyObj.length()) {
+                    extractFromJsonAny(anyObj.opt(i), out, hintLabel, hintQuality)
                 }
             }
-            is Map<*, *> -> {
-                val label = (value["provider"] ?: value["server"])?.toString()?.trim()
-                    ?.takeIf { it.isNotBlank() } ?: hintLabel
-                val quality = (value["quality"] ?: value["resolution"])?.toString()?.trim()
-                    ?.takeIf { it.isNotBlank() } ?: hintQuality
+            is JSONObject -> {
+                val label = anyObj.optString("provider", "")
+                    .ifBlank { anyObj.optString("server", "") }
+                    .ifBlank { hintLabel }
+                val quality = anyObj.optString("quality", "")
+                    .ifBlank { anyObj.optString("resolution", "") }
+                    .ifBlank { hintQuality ?: "" }
+                    .takeIf { it.isNotBlank() }
 
                 val priorityKeys = listOf(
                     "proxied_url", "download_url", "manifestUrl", "manifest_url",
@@ -203,16 +208,18 @@ class FlaxferProvider : MainAPI() {
                     "file", "video", "video_url", "link", "source"
                 )
                 for (k in priorityKeys) {
-                    val v = value[k]
-                    if (v is String && v.trim().startsWith("http") && !v.contains("image.tmdb.org", ignoreCase = true)) {
-                        out.add(Triple(v.trim(), label, quality))
+                    val u = anyObj.optString(k, "").trim()
+                    if (u.startsWith("http") && !u.contains("image.tmdb.org", ignoreCase = true)) {
+                        out.add(Triple(u, label, quality))
                     }
                 }
 
-                for ((k, v) in value) {
-                    val keyStr = k?.toString()?.lowercase() ?: ""
-                    if (keyStr !in listOf("poster", "backdrop", "image", "thumbnail", "subtitle", "subtitles", "subs", "captions")) {
-                        extractUrlsRecursive(v, out, label, quality)
+                val keysIter = anyObj.keys()
+                while (keysIter.hasNext()) {
+                    val key = keysIter.next()
+                    val keyLower = key.lowercase()
+                    if (keyLower !in listOf("poster", "backdrop", "image", "thumbnail", "subtitle", "subtitles", "subs", "captions")) {
+                        extractFromJsonAny(anyObj.opt(key), out, label, quality)
                     }
                 }
             }
@@ -287,27 +294,35 @@ class FlaxferProvider : MainAPI() {
                 val rawText = app.get(apiUrl, timeout = 12).text
                 if (rawText.isBlank()) return@amap
 
-                val parsedMap = try {
-                    AppUtils.parseJson>(rawText)
+                val trimmed = rawText.trim()
+                val jsonRoot: Any? = try {
+                    if (trimmed.startsWith("{")) JSONObject(trimmed)
+                    else if (trimmed.startsWith("[")) JSONArray(trimmed)
+                    else null
                 } catch (_: Exception) {
                     null
                 }
 
-                if (parsedMap != null) {
+                if (jsonRoot != null) {
                     val found = mutableListOf<Triple<String, String?, String?>>()
-                    extractUrlsRecursive(parsedMap, found, providerLabel, null)
+                    extractFromJsonAny(jsonRoot, found, providerLabel, null)
                     found.forEach { (u, lbl, q) ->
                         emitStream(u, "$name - ${lbl ?: providerLabel}", q)
                     }
 
-                    val subsList = parsedMap["subtitles"] as? List<*>
-                    subsList?.forEach { subAny ->
-                        val subMap = subAny as? Map<*, *> ?: return@forEach
-                        val subUrl = subMap["url"]?.toString()?.trim().orEmpty()
-                        if (subUrl.startsWith("http")) {
-                            val subLabel = (subMap["label"] ?: subMap["language"] ?: subMap["lang"])
-                                ?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: "English"
-                            subtitleCallback.invoke(newSubtitleFile(subLabel, subUrl))
+                    if (jsonRoot is JSONObject) {
+                        val subsArr = jsonRoot.optJSONArray("subtitles")
+                        if (subsArr != null) {
+                            for (i in 0 until subsArr.length()) {
+                                val subObj = subsArr.optJSONObject(i) ?: continue
+                                val subUrl = subObj.optString("url", "").trim()
+                                if (subUrl.startsWith("http")) {
+                                    val subLabel = subObj.optString("label", "")
+                                        .ifBlank { subObj.optString("language", "") }
+                                        .ifBlank { "English" }
+                                    subtitleCallback.invoke(newSubtitleFile(subLabel, subUrl))
+                                }
+                            }
                         }
                     }
                 } else {
