@@ -1,7 +1,6 @@
 package com.flaxfer
 
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.fasterxml.jackson.databind.JsonNode
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
@@ -163,16 +162,20 @@ class FlaxferProvider : MainAPI() {
         }
     }
 
-    private fun extractMediaUrlsFromNode(node: JsonNode?, out: MutableList<Triple<String, String?, String?>>, hintLabel: String) {
-        if (node == null || node.isNull) return
-        when {
-            node.isTextual -> {
-                val txt = node.asText().trim()
+    private fun extractUrlsRecursive(
+        value: Any?,
+        out: MutableList<Triple<String, String?, String?>>,
+        hintLabel: String,
+        hintQuality: String?
+    ) {
+        if (value == null) return
+        when (value) {
+            is String -> {
+                val txt = value.trim()
                 if (txt.startsWith("http") &&
                     (txt.contains(".m3u8", ignoreCase = true) ||
                         txt.contains(".mp4", ignoreCase = true) ||
                         txt.contains("/hls/", ignoreCase = true) ||
-                        txt.contains("/api/", ignoreCase = true) ||
                         txt.contains("stream", ignoreCase = true) ||
                         txt.contains("proxy", ignoreCase = true)) &&
                     !txt.contains("image.tmdb.org", ignoreCase = true) &&
@@ -180,21 +183,19 @@ class FlaxferProvider : MainAPI() {
                     !txt.endsWith(".png", ignoreCase = true) &&
                     !txt.endsWith(".webp", ignoreCase = true)
                 ) {
-                    out.add(Triple(txt, null, null))
+                    out.add(Triple(txt, hintLabel, hintQuality))
                 }
             }
-            node.isArray -> {
-                for (child in node) {
-                    extractMediaUrlsFromNode(child, out, hintLabel)
+            is List<*> -> {
+                for (item in value) {
+                    extractUrlsRecursive(item, out, hintLabel, hintQuality)
                 }
             }
-            node.isObject -> {
-                val label = node.path("provider").asText("")
-                    .ifBlank { node.path("server").asText("") }
-                    .ifBlank { hintLabel }
-                val quality = node.path("quality").asText("")
-                    .ifBlank { node.path("resolution").asText("") }
-                    .ifBlank { null }
+            is Map<*, *> -> {
+                val label = (value["provider"] ?: value["server"])?.toString()?.trim()
+                    ?.takeIf { it.isNotBlank() } ?: hintLabel
+                val quality = (value["quality"] ?: value["resolution"])?.toString()?.trim()
+                    ?.takeIf { it.isNotBlank() } ?: hintQuality
 
                 val priorityKeys = listOf(
                     "proxied_url", "download_url", "manifestUrl", "manifest_url",
@@ -202,19 +203,16 @@ class FlaxferProvider : MainAPI() {
                     "file", "video", "video_url", "link", "source"
                 )
                 for (k in priorityKeys) {
-                    if (node.has(k) && node.get(k).isTextual) {
-                        val u = node.get(k).asText().trim()
-                        if (u.startsWith("http") && !u.contains("image.tmdb.org", ignoreCase = true)) {
-                            out.add(Triple(u, label, quality))
-                        }
+                    val v = value[k]
+                    if (v is String && v.trim().startsWith("http") && !v.contains("image.tmdb.org", ignoreCase = true)) {
+                        out.add(Triple(v.trim(), label, quality))
                     }
                 }
 
-                val fields = node.fields()
-                while (fields.hasNext()) {
-                    val entry = fields.next()
-                    if (entry.key !in listOf("poster", "backdrop", "image", "thumbnail", "subtitle", "subtitles", "subs", "captions")) {
-                        extractMediaUrlsFromNode(entry.value, out, label)
+                for ((k, v) in value) {
+                    val keyStr = k?.toString()?.lowercase() ?: ""
+                    if (keyStr !in listOf("poster", "backdrop", "image", "thumbnail", "subtitle", "subtitles", "subs", "captions")) {
+                        extractUrlsRecursive(v, out, label, quality)
                     }
                 }
             }
@@ -289,29 +287,27 @@ class FlaxferProvider : MainAPI() {
                 val rawText = app.get(apiUrl, timeout = 12).text
                 if (rawText.isBlank()) return@amap
 
-                val jsonNode = try {
-                    jacksonObjectMapper().readTree(rawText)
+                val parsedMap = try {
+                    AppUtils.parseJson>(rawText)
                 } catch (_: Exception) {
                     null
                 }
 
-                if (jsonNode != null) {
+                if (parsedMap != null) {
                     val found = mutableListOf<Triple<String, String?, String?>>()
-                    extractMediaUrlsFromNode(jsonNode, found, providerLabel)
+                    extractUrlsRecursive(parsedMap, found, providerLabel, null)
                     found.forEach { (u, lbl, q) ->
                         emitStream(u, "$name - ${lbl ?: providerLabel}", q)
                     }
 
-                    val subsNode = jsonNode.path("subtitles")
-                    if (subsNode.isArray) {
-                        for (sub in subsNode) {
-                            val subUrl = sub.path("url").asText("").trim()
-                            if (subUrl.startsWith("http")) {
-                                val subLabel = sub.path("label").asText("")
-                                    .ifBlank { sub.path("language").asText("") }
-                                    .ifBlank { "English" }
-                                subtitleCallback.invoke(newSubtitleFile(subLabel, subUrl))
-                            }
+                    val subsList = parsedMap["subtitles"] as? List<*>
+                    subsList?.forEach { subAny ->
+                        val subMap = subAny as? Map<*, *> ?: return@forEach
+                        val subUrl = subMap["url"]?.toString()?.trim().orEmpty()
+                        if (subUrl.startsWith("http")) {
+                            val subLabel = (subMap["label"] ?: subMap["language"] ?: subMap["lang"])
+                                ?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: "English"
+                            subtitleCallback.invoke(newSubtitleFile(subLabel, subUrl))
                         }
                     }
                 } else {
