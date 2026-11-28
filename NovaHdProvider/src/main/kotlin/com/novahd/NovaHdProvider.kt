@@ -75,16 +75,16 @@ class NovaHdProvider : MainAPI() {
         @JsonProperty("type") val type: String? = null
     )
 
-    data class NovaSourcesResponse(
-        @JsonProperty("sources") val sources: List<NovaSourceItem>? = null,
-        @JsonProperty("subtitles") val subtitles: List<NovaSubtitleItem>? = null
-    )
-
     data class NovaSubtitleItem(
         @JsonProperty("url") val url: String? = null,
         @JsonProperty("lang") val lang: String? = null,
         @JsonProperty("language") val language: String? = null,
         @JsonProperty("label") val label: String? = null
+    )
+
+    data class NovaSourcesResponse(
+        @JsonProperty("sources") val sources: List<NovaSourceItem>? = null,
+        @JsonProperty("subtitles") val subtitles: List<NovaSubtitleItem>? = null
     )
 
     private fun NovaTitleItem.toSearchResponse(): SearchResponse? {
@@ -209,21 +209,19 @@ class NovaHdProvider : MainAPI() {
         val allSubtitles = mutableListOf<NovaSubtitleItem>()
         val seenUrls = mutableSetOf<String>()
 
-        // ১. প্রথমে সাধারণ সিঙ্গেল JSON হিসেবে পার্স করার চেষ্টা
         val singleParsed = try {
             AppUtils.parseJson<NovaSourcesResponse>(responseText)
         } catch (_: Exception) {
             null
         }
 
-        if (singleParsed != null) {
+        if (singleParsed != null && (!singleParsed.sources.isNullOrEmpty() || !singleParsed.subtitles.isNullOrEmpty())) {
             singleParsed.sources?.forEach { s ->
                 val u = s.url?.trim()
                 if (!u.isNullOrBlank() && seenUrls.add(u)) allSources.add(s)
             }
             singleParsed.subtitles?.let { allSubtitles.addAll(it) }
         } else {
-            // ২. NDJSON (লাইন-বাই-লাইন JSON) হলে প্রতিটি লাইন আলাদাভাবে পার্স করা
             responseText.lines().forEach { rawLine ->
                 val line = rawLine.trim()
                 if (line.isBlank() || line.startsWith(":")) return@forEach
@@ -253,7 +251,6 @@ class NovaHdProvider : MainAPI() {
             if (streamUrl.startsWith("/")) {
                 streamUrl = "$mainUrl$streamUrl"
             }
-            // Torrent বা অবৈধ প্রোটোকল বাদ দেওয়া
             if (!streamUrl.startsWith("http")) return@forEach
 
             val label = buildString {
