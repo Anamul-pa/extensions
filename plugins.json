@@ -12,5 +12,19 @@
     "description": "NovaHD Movies and TV Series Provider",
     "url": "https://raw.githubusercontent.com/Anamul-pa/extensions/builds/NovaHdProvider.cs3",
     "name": "NovaHdProvider"
+  },
+  {
+    "apiVersion": 1,
+    "repositoryUrl": "https://github.com/Anamul-pa/extensions",
+    "fileSize": 10000,
+    "status": 1,
+    "language": "en",
+    "authors": ["Anamul"],
+    "tvTypes": ["Movie", "TvSeries", "Anime"],
+    "version": 1,
+    "internalName": "FlaxferProvider",
+    "description": "Flaxfer Movies, TV Shows and Anime Provider",
+    "url": "https://raw.githubusercontent.com/Anamul-pa/extensions/builds/FlaxferProvider.cs3",
+    "name": "FlaxferProvider"
   }
 ]
