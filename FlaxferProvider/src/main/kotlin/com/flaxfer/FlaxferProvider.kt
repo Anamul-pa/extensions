@@ -145,7 +145,7 @@ class FlaxferProvider : MainAPI() {
                     epList.forEach { ep ->
                         val eNum = ep.episodeNumber ?: return@forEach
                         episodes.add(
-                            newEpisode("$id|$sNum\vert{}$eNum") {
+                            newEpisode("$id|$sNum|$eNum") {
                                 this.name = ep.name?.takeIf { it.isNotBlank() } ?: "Episode $eNum"
                                 this.season = sNum
                                 this.episode = eNum
@@ -158,8 +158,140 @@ class FlaxferProvider : MainAPI() {
                     val count = season.episodeCount ?: 0
                     for (eNum in 1..count) {
                         episodes.add(
-                            newEpisode("$id|$sNum\vert{}$eNum") {
+                            newEpisode("$id|$sNum|$eNum") {
                                 this.name = "Episode $eNum"
                                 this.season = sNum
                                 this.episode = eNum
-                                this
+                                this.posterUrl = data.posterPath?.let { "$imgBase/w500$it" }
+                            }
+                        )
+                    }
+                }
+            }
+
+            newTvSeriesLoadResponse(title, "$mainUrl/tv/$id", TvType.TvSeries, episodes) {
+                this.posterUrl = data.posterPath?.let { "$imgBase/w500$it" }
+                this.backgroundPosterUrl = data.backdropPath?.let { "$imgBase/original$it" }
+                this.plot = data.overview
+                this.year = data.firstAirDate?.take(4)?.toIntOrNull()
+                this.score = Score.from10(data.voteAverage)
+            }
+        } else {
+            val data = app.get("$tmdbBase/movie/$id?api_key=$tmdbKey").parsedSafe<TmdbItem>() ?: return null
+            val title = (data.title ?: data.name) ?: return null
+            newMovieLoadResponse(title, "$mainUrl/movie/$id", TvType.Movie, "$id") {
+                this.posterUrl = data.posterPath?.let { "$imgBase/w500$it" }
+                this.backgroundPosterUrl = data.backdropPath?.let { "$imgBase/original$it" }
+                this.plot = data.overview
+                this.year = data.releaseDate?.take(4)?.toIntOrNull()
+                this.score = Score.from10(data.voteAverage)
+            }
+        }
+    }
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val parts = data.split("|")
+        val isTv = parts.size >= 3
+        val id = parts[0]
+        val s = parts.getOrNull(1) ?: "1"
+        val e = parts.getOrNull(2) ?: "1"
+
+        val seenUrls = mutableSetOf<String>()
+        var addedCount = 0
+
+        suspend fun emitDirectLink(rawUrl: String?, sourceLabel: String, qualityStr: String?, formatStr: String?) {
+            val cleanUrl = rawUrl?.trim()?.takeIf { it.startsWith("http") } ?: return
+            if (!seenUrls.add(cleanUrl)) return
+
+            val qInt = Regex("(\\d{3,4})").find(qualityStr ?: "")?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Qualities.Unknown.value
+            val isHls = formatStr.equals("hls", ignoreCase = true) ||
+                cleanUrl.contains(".m3u8", ignoreCase = true) ||
+                cleanUrl.contains("/hls/", ignoreCase = true)
+
+            callback.invoke(
+                newExtractorLink(
+                    source = sourceLabel,
+                    name = sourceLabel,
+                    url = cleanUrl,
+                    type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = "$mainUrl/"
+                    this.quality = qInt
+                }
+            )
+            addedCount++
+        }
+
+        val directEndpoints = if (isTv) {
+            listOf(
+                "Astra" to "https://astra0.thatis3word.dev/api/resolve?type=tv&id=$id&s=$s&e=$e",
+                "CineBros" to "https://altra0.forilas852.workers.dev/cinebros/api/tv/$id/$s/$e",
+                "VZ Cloud" to "https://api.vz.raphsm4.dev/resolve?id=$id&type=tv&season=$s&episode=$e",
+                "MVSNerd" to "https://mvsnerd.namitutu5.workers.dev/tv/$id/$s/$e",
+                "VidSpark" to "https://alexamuf.xyz/vs/tv/$id/$s/$e",
+                "MovieBox MP4" to "https://themoviebox.uk/download/tv/$id/$s/$e",
+                "Flix2Watch" to "https://flix2watch.pro/api/tv/$id/$s/$e"
+            )
+        } else {
+            listOf(
+                "Astra" to "https://astra0.thatis3word.dev/api/resolve?type=movie&id=$id",
+                "CineBros" to "https://altra0.forilas852.workers.dev/cinebros/api/movie/$id",
+                "VZ Cloud" to "https://api.vz.raphsm4.dev/resolve?id=$id&type=movie",
+                "MVSNerd" to "https://mvsnerd.namitutu5.workers.dev/movie/$id",
+                "VidSpark" to "https://alexamuf.xyz/vs/movie/$id",
+                "MovieBox MP4" to "https://themoviebox.uk/download/movie/$id",
+                "Flix2Watch" to "https://flix2watch.pro/api/movie/$id"
+            )
+        }
+
+        directEndpoints.amap { (providerLabel, apiUrl) ->
+            try {
+                val res = app.get(apiUrl, timeout = 12).parsedSafe<DirectResolveResponse>() ?: return@amap
+                res.subtitles?.forEach { sub ->
+                    val subUrl = sub.url?.takeIf { it.startsWith("http") } ?: return@forEach
+                    val subName = sub.label ?: sub.language ?: sub.lang ?: "English"
+                    subtitleCallback.invoke(SubtitleFile(subName, subUrl))
+                }
+                val combined = (res.streams ?: emptyList()) + (res.sources ?: emptyList()) + (res.downloads ?: emptyList())
+                combined.forEach { item ->
+                    val finalUrl = item.proxiedUrl ?: item.downloadUrl ?: item.url
+                    val label = item.provider?.takeIf { it.isNotBlank() } ?: providerLabel
+                    emitDirectLink(finalUrl, "$name - $label", item.quality ?: item.resolution, item.format ?: item.type)
+                }
+                if (!res.url.isNullOrBlank()) {
+                    emitDirectLink(res.url, "$name - $providerLabel", "HD", null)
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        val embedUrls = if (isTv) {
+            listOf(
+                "https://vidlink.pro/tv/$id/$s/$e",
+                "https://vixsrc.to/tv/$id/$s/$e/"
+            )
+        } else {
+            listOf(
+                "https://vidlink.pro/movie/$id",
+                "https://vixsrc.to/movie/$id"
+            )
+        }
+
+        embedUrls.amap { embedUrl ->
+            try {
+                if (loadExtractor(embedUrl, "$mainUrl/", subtitleCallback, callback)) {
+                    addedCount++
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        return addedCount > 0
+    }
+}
