@@ -16,13 +16,13 @@ class NovaHdProvider : MainAPI() {
     private val visitorId = UUID.randomUUID().toString()
     private val imageBase = "https://image.tmdb.org/t/p"
 
-    private fun defaultHeaders(): Map<String, String> = mapOf(
+    private fun defaultHeaders(accept: String = "application/json, text/plain, */*"): Map<String, String> = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "x-nova-visitor" to visitorId,
         "X-Nova-Visitor" to visitorId,
         "Referer" to "$mainUrl/",
         "Origin" to mainUrl,
-        "Accept" to "application/json, text/plain, */*"
+        "Accept" to accept
     )
 
     private fun posterUrl(path: String?): String? {
@@ -76,7 +76,15 @@ class NovaHdProvider : MainAPI() {
     )
 
     data class NovaSourcesResponse(
-        @JsonProperty("sources") val sources: List<NovaSourceItem>? = null
+        @JsonProperty("sources") val sources: List<NovaSourceItem>? = null,
+        @JsonProperty("subtitles") val subtitles: List<NovaSubtitleItem>? = null
+    )
+
+    data class NovaSubtitleItem(
+        @JsonProperty("url") val url: String? = null,
+        @JsonProperty("lang") val lang: String? = null,
+        @JsonProperty("language") val language: String? = null,
+        @JsonProperty("label") val label: String? = null
     )
 
     private fun NovaTitleItem.toSearchResponse(): SearchResponse? {
@@ -192,24 +200,71 @@ class NovaHdProvider : MainAPI() {
             "$mainUrl/api/sources?type=movie&tmdbId=$tmdbId"
         }
 
-        val responseText = app.get(apiUrl, headers = defaultHeaders()).text
-        val parsed = try {
+        val responseText = app.get(
+            apiUrl,
+            headers = defaultHeaders("application/json, application/x-ndjson, text/plain, */*")
+        ).text
+
+        val allSources = mutableListOf<NovaSourceItem>()
+        val allSubtitles = mutableListOf<NovaSubtitleItem>()
+        val seenUrls = mutableSetOf<String>()
+
+        // ১. প্রথমে সাধারণ সিঙ্গেল JSON হিসেবে পার্স করার চেষ্টা
+        val singleParsed = try {
             AppUtils.parseJson<NovaSourcesResponse>(responseText)
         } catch (_: Exception) {
             null
         }
 
-        val foundSources = parsed?.sources ?: emptyList()
+        if (singleParsed != null) {
+            singleParsed.sources?.forEach { s ->
+                val u = s.url?.trim()
+                if (!u.isNullOrBlank() && seenUrls.add(u)) allSources.add(s)
+            }
+            singleParsed.subtitles?.let { allSubtitles.addAll(it) }
+        } else {
+            // ২. NDJSON (লাইন-বাই-লাইন JSON) হলে প্রতিটি লাইন আলাদাভাবে পার্স করা
+            responseText.lines().forEach { rawLine ->
+                val line = rawLine.trim()
+                if (line.isBlank() || line.startsWith(":")) return@forEach
+                val chunk = try {
+                    AppUtils.parseJson<NovaSourcesResponse>(line)
+                } catch (_: Exception) {
+                    null
+                }
+                chunk?.sources?.forEach { s ->
+                    val u = s.url?.trim()
+                    if (!u.isNullOrBlank() && seenUrls.add(u)) allSources.add(s)
+                }
+                chunk?.subtitles?.let { allSubtitles.addAll(it) }
+            }
+        }
+
+        allSubtitles.forEach { sub ->
+            val subUrl = sub.url?.takeIf { it.isNotBlank() } ?: return@forEach
+            val fullSubUrl = if (subUrl.startsWith("http")) subUrl else "$mainUrl$subUrl"
+            val subLang = sub.label ?: sub.language ?: sub.lang ?: "English"
+            subtitleCallback.invoke(SubtitleFile(subLang, fullSubUrl))
+        }
+
         var added = 0
-        foundSources.forEach { src ->
-            val streamUrl = src.url?.takeIf { it.isNotBlank() } ?: return@forEach
+        allSources.forEach { src ->
+            var streamUrl = src.url?.trim()?.takeIf { it.isNotBlank() } ?: return@forEach
+            if (streamUrl.startsWith("/")) {
+                streamUrl = "$mainUrl$streamUrl"
+            }
+            // Torrent বা অবৈধ প্রোটোকল বাদ দেওয়া
+            if (!streamUrl.startsWith("http")) return@forEach
+
             val label = buildString {
                 append(src.provider?.takeIf { it.isNotBlank() } ?: name)
                 if (!src.language.isNullOrBlank()) append(" (${src.language})")
             }
             val qInt = Regex("(\\d{3,4})").find(src.quality ?: "")?.groupValues?.getOrNull(1)?.toIntOrNull()
                 ?: Qualities.Unknown.value
-            val isHls = src.type.equals("hls", ignoreCase = true) || streamUrl.contains(".m3u8", ignoreCase = true)
+            val isHls = src.type.equals("hls", ignoreCase = true) ||
+                streamUrl.contains(".m3u8", ignoreCase = true) ||
+                streamUrl.contains("/api/gs-hls", ignoreCase = true)
 
             callback.invoke(
                 newExtractorLink(
