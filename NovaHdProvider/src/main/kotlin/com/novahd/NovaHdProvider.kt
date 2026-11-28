@@ -2,7 +2,6 @@ package com.novahd
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
 import java.util.UUID
 
@@ -14,11 +13,11 @@ class NovaHdProvider : MainAPI() {
     override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
-    private val cloudflareKiller by lazy { CloudflareKiller() }
     private val visitorId = UUID.randomUUID().toString()
     private val imageBase = "https://image.tmdb.org/t/p"
 
     private fun defaultHeaders(): Map<String, String> = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "x-nova-visitor" to visitorId,
         "X-Nova-Visitor" to visitorId,
         "Referer" to "$mainUrl/",
@@ -83,7 +82,8 @@ class NovaHdProvider : MainAPI() {
     private fun NovaTitleItem.toSearchResponse(): SearchResponse? {
         val id = tmdbId ?: return null
         val itemTitle = title?.takeIf { it.isNotBlank() } ?: return null
-        val isMovie = type.equals("movie", ignoreCase = true) || (!type.equals("tv", ignoreCase = true) && !type.equals("show", ignoreCase = true) && releaseDate != null && firstAirDate == null)
+        val isMovie = type.equals("movie", ignoreCase = true) ||
+            (!type.equals("tv", ignoreCase = true) && !type.equals("show", ignoreCase = true) && releaseDate != null && firstAirDate == null)
         val href = if (isMovie) "$mainUrl/m/$id" else "$mainUrl/s/$id"
         return if (isMovie) {
             newMovieSearchResponse(itemTitle, href, TvType.Movie) {
@@ -113,7 +113,7 @@ class NovaHdProvider : MainAPI() {
             request.data
         }
 
-        val res = app.get(targetUrl, headers = defaultHeaders(), interceptor = cloudflareKiller)
+        val res = app.get(targetUrl, headers = defaultHeaders())
             .parsedSafe<NovaListResponse>()
         val items = res?.results?.mapNotNull { it.toSearchResponse() } ?: emptyList()
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty() && !request.data.contains("/api/trending"))
@@ -122,7 +122,7 @@ class NovaHdProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = java.net.URLEncoder.encode(query.trim(), "UTF-8")
         val url = "$mainUrl/api/search?search=$encoded&page=1"
-        val res = app.get(url, headers = defaultHeaders(), interceptor = cloudflareKiller)
+        val res = app.get(url, headers = defaultHeaders())
             .parsedSafe<NovaListResponse>()
         return res?.results?.mapNotNull { it.toSearchResponse() } ?: emptyList()
     }
@@ -134,7 +134,7 @@ class NovaHdProvider : MainAPI() {
 
         return if (isMovie) {
             val detailUrl = "$mainUrl/api/movies/$id"
-            val item = app.get(detailUrl, headers = defaultHeaders(), interceptor = cloudflareKiller)
+            val item = app.get(detailUrl, headers = defaultHeaders())
                 .parsedSafe<NovaTitleItem>() ?: return null
             val title = item.title ?: return null
             newMovieLoadResponse(title, "$mainUrl/m/$id", TvType.Movie, "$id") {
@@ -142,11 +142,11 @@ class NovaHdProvider : MainAPI() {
                 this.backgroundPosterUrl = backdropUrl(item.backdropPath)
                 this.plot = item.overview
                 this.year = item.releaseDate?.take(4)?.toIntOrNull()
-                this.rating = item.voteAverage?.let { ((it * 10).toInt()) }
+                this.score = Score.from10(item.voteAverage)
             }
         } else {
             val detailUrl = "$mainUrl/api/shows/$id"
-            val item = app.get(detailUrl, headers = defaultHeaders(), interceptor = cloudflareKiller)
+            val item = app.get(detailUrl, headers = defaultHeaders())
                 .parsedSafe<NovaTitleItem>() ?: return null
             val title = item.title ?: return null
             val episodes = mutableListOf<Episode>()
@@ -170,7 +170,7 @@ class NovaHdProvider : MainAPI() {
                 this.backgroundPosterUrl = backdropUrl(item.backdropPath)
                 this.plot = item.overview
                 this.year = item.firstAirDate?.take(4)?.toIntOrNull()
-                this.rating = item.voteAverage?.let { ((it * 10).toInt()) }
+                this.score = Score.from10(item.voteAverage)
             }
         }
     }
@@ -192,7 +192,7 @@ class NovaHdProvider : MainAPI() {
             "$mainUrl/api/sources?type=movie&tmdbId=$tmdbId"
         }
 
-        val responseText = app.get(apiUrl, headers = defaultHeaders(), interceptor = cloudflareKiller).text
+        val responseText = app.get(apiUrl, headers = defaultHeaders()).text
         val parsed = try {
             AppUtils.parseJson<NovaSourcesResponse>(responseText)
         } catch (_: Exception) {
